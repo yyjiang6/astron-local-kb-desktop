@@ -1,0 +1,100 @@
+# 本地知识库桌面客户端 · 三平台构建（Windows / Linux / macOS，免签名内测）
+#
+# 原理：CI 自动拉取官方 anything-llm 源码 → 打上 astron /knowledge/v1 适配器（apply-adapter.cjs）
+#       → 构建前端 + 暂存 server/collector + 随包 node → electron-builder 出当前平台安装包。
+# 你不需要 fork anything-llm；CI 直接从 GitHub 拉官方源码。
+#
+# 触发：Actions 页手动 Run workflow，或推 tag v* 自动。
+# 产物：Artifacts 里下载 windows-installer(.exe) / linux-installer(.AppImage) / mac-installer(.dmg)
+
+name: build-desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      anyllm_ref:
+        description: "anything-llm 源码分支/标签"
+        default: "master"
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows-installer
+            node_name: node.exe
+          - os: ubuntu-latest
+            artifact: linux-installer
+            node_name: node
+          - os: macos-latest
+            artifact: mac-installer
+            node_name: node
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout build kit
+        uses: actions/checkout@v4
+
+      - name: Checkout anything-llm (official)
+        uses: actions/checkout@v4
+        with:
+          repository: Mintplex-Labs/anything-llm
+          ref: ${{ github.event.inputs.anyllm_ref || 'master' }}
+          path: anything-llm
+
+      - name: Setup Node 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Apply astron adapter
+        shell: bash
+        run: node apply-adapter.cjs "${{ github.workspace }}/anything-llm"
+
+      - name: Install server & collector
+        shell: bash
+        run: |
+          cd anything-llm/server && npm ci --omit=dev && cd ../..
+          cd anything-llm/collector && npm ci --omit=dev && cd ../..
+
+      - name: Build frontend -> server/public
+        shell: bash
+        run: |
+          cd anything-llm/frontend
+          npm ci
+          echo "VITE_API_BASE='/api'" > .env.production
+          npm run build
+          rm -rf ../server/public && mkdir -p ../server/public
+          cp -r dist/* ../server/public/
+
+      - name: Stage payload
+        shell: bash
+        run: |
+          rm -rf electron-wrapper/payload && mkdir -p electron-wrapper/payload
+          cp -r anything-llm/server electron-wrapper/payload/server
+          cp -r anything-llm/collector electron-wrapper/payload/collector
+          node -e "const fs=require('fs');fs.copyFileSync(process.execPath,'electron-wrapper/payload/${{ matrix.node_name }}')"
+          chmod +x "electron-wrapper/payload/${{ matrix.node_name }}" || true
+
+      - name: Build installer
+        shell: bash
+        working-directory: electron-wrapper
+        run: |
+          npm install
+          npx electron-builder --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # macOS 跳过签名（内测）
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            electron-wrapper/dist/*.exe
+            electron-wrapper/dist/*.AppImage
+            electron-wrapper/dist/*.dmg
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,7 @@
+node_modules/
+electron-wrapper/node_modules/
+electron-wrapper/payload/
+electron-wrapper/dist/
+anything-llm/
+*.log
+.DS_Store
