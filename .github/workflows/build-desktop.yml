@@ -54,21 +54,19 @@ jobs:
         shell: bash
         run: node apply-adapter.cjs "${{ github.workspace }}/anything-llm"
 
+      # anything-llm 是 yarn 项目（只有 yarn.lock，无 package-lock.json），必须用 yarn，不能 npm ci
       - name: Install server & collector
         shell: bash
         run: |
-          cd anything-llm/server && npm ci --omit=dev && cd ../..
-          cd anything-llm/collector && npm ci --omit=dev && cd ../..
+          ( cd anything-llm/server && yarn install --network-timeout 600000 )
+          ( cd anything-llm/collector && yarn install --network-timeout 600000 )
 
       - name: Build frontend -> server/public
         shell: bash
         run: |
-          cd anything-llm/frontend
-          npm ci
-          echo "VITE_API_BASE='/api'" > .env.production
-          npm run build
-          rm -rf ../server/public && mkdir -p ../server/public
-          cp -r dist/* ../server/public/
+          ( cd anything-llm/frontend && yarn install --network-timeout 600000 && echo "VITE_API_BASE='/api'" > .env.production && yarn build )
+          rm -rf anything-llm/server/public && mkdir -p anything-llm/server/public
+          cp -r anything-llm/frontend/dist/* anything-llm/server/public/
 
       - name: Stage payload
         shell: bash
