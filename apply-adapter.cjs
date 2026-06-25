@@ -148,4 +148,39 @@ try {
   console.warn("• stream.js 深度集成失败（非致命）:", e.message);
 }
 
-console.log("\n完成。适配器已应用，桌面端打包 server 时会一并包含 /knowledge/v1/* 端点 + 端云对话集成。");
+// 5) 品牌替换：把 AnythingLLM logo 换成平台 logo + 标题改为平台名。幂等；失败仅告警。
+try {
+  const BRAND_NAME = "国家人工智能应用生态公共服务平台（合肥）";
+  const brandLogo = path.join(__dirname, "brand-logo.png");
+  const feSrc = path.join(root, "frontend", "src");
+  // 5a 替换侧边栏 logo 图（浅/深都换成平台 logo）
+  if (fs.existsSync(brandLogo) && fs.existsSync(feSrc)) {
+    for (const name of ["anything-llm.png", "anything-llm-dark.png"]) {
+      const dst = path.join(feSrc, "media", "logo", name);
+      if (fs.existsSync(path.dirname(dst))) {
+        fs.copyFileSync(brandLogo, dst);
+      }
+    }
+    console.log("✓ 侧边栏 logo 替换为平台 logo");
+  } else {
+    console.warn("• 未找到 brand-logo.png 或 frontend/src，跳过 logo 替换");
+  }
+  // 5b 改 index.html 标题/meta 为平台名
+  const htmlPath = path.join(root, "frontend", "index.html");
+  if (fs.existsSync(htmlPath)) {
+    let html = fs.readFileSync(htmlPath, "utf-8");
+    const before = html;
+    html = html.replace(/AnythingLLM \| Your personal LLM trained on anything/g, BRAND_NAME);
+    html = html.replace(/<title>[^<]*<\/title>/, `<title>${BRAND_NAME}</title>`);
+    if (html !== before) {
+      fs.writeFileSync(htmlPath, html);
+      console.log("✓ index.html 标题/meta 改为平台名");
+    } else {
+      console.log("• index.html 无需改（已是平台名或锚点变化）");
+    }
+  }
+} catch (e) {
+  console.warn("• 品牌替换失败（非致命）:", e.message);
+}
+
+console.log("\n完成。适配器已应用，桌面端打包 server 时会一并包含 /knowledge/v1/* 端点 + 端云对话集成 + 平台品牌。");
