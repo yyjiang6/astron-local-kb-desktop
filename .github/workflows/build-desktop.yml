@@ -13,8 +13,8 @@ on:
   workflow_dispatch:
     inputs:
       anyllm_ref:
-        description: "anything-llm 源码分支/标签"
-        default: "master"
+        description: "astron-anything-llm fork 的分支/标签"
+        default: "main"
   push:
     tags: ["v*"]
 
