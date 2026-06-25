@@ -183,4 +183,32 @@ try {
   console.warn("• 品牌替换失败（非致命）:", e.message);
 }
 
+// 6) i18n 文案去品牌：locales 里的 "AnythingLLM" 文案值 -> 英文简写 AstronKB（仅 locales，不碰代码标识符）。
+try {
+  const BRAND_SHORT = "AstronKB";
+  const localesDir = path.join(root, "frontend", "src", "locales");
+  if (fs.existsSync(localesDir)) {
+    let changed = 0;
+    const walk = (dir) => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) walk(p);
+        else if (/\.(js|ts)$/.test(ent.name)) {
+          const before = fs.readFileSync(p, "utf-8");
+          if (before.includes("AnythingLLM")) {
+            fs.writeFileSync(p, before.replace(/AnythingLLM/g, BRAND_SHORT));
+            changed++;
+          }
+        }
+      }
+    };
+    walk(localesDir);
+    console.log(`✓ i18n 文案 AnythingLLM -> ${BRAND_SHORT}（${changed} 个文件）`);
+  } else {
+    console.warn("• 未找到 frontend/src/locales，跳过 i18n 去品牌");
+  }
+} catch (e) {
+  console.warn("• i18n 去品牌失败（非致命）:", e.message);
+}
+
 console.log("\n完成。适配器已应用，桌面端打包 server 时会一并包含 /knowledge/v1/* 端点 + 端云对话集成 + 平台品牌。");
