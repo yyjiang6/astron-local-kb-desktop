@@ -55,14 +55,22 @@ jobs:
         run: node apply-adapter.cjs "${{ github.workspace }}/anything-llm"
 
       # anything-llm 是 yarn 项目（只有 yarn.lock，无 package-lock.json），必须用 yarn，不能 npm ci
+      # GITHUB_TOKEN：@vscode/ripgrep 的 postinstall 会调 GitHub API 下载预编译二进制，
+      # CI 未带 token 会触发 403 限流。注入内置 token 后用其认证，绕开 403。
       - name: Install server & collector
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ( cd anything-llm/server && yarn install --network-timeout 600000 )
           ( cd anything-llm/collector && yarn install --network-timeout 600000 )
 
       - name: Build frontend -> server/public
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ( cd anything-llm/frontend && yarn install --network-timeout 600000 && echo "VITE_API_BASE='/api'" > .env.production && yarn build )
           rm -rf anything-llm/server/public && mkdir -p anything-llm/server/public

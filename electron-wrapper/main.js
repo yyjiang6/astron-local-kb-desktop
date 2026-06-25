@@ -15,7 +15,7 @@
  * 数据目录用 app.getPath('userData')，避免污染安装目录。
  */
 
-const { app, BrowserWindow, shell, Menu } = require("electron");
+const { app, BrowserWindow, shell, Menu, session, net } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
@@ -23,6 +23,24 @@ const http = require("http");
 const SERVER_PORT = process.env.SERVER_PORT || "3001";
 const COLLECTOR_PORT = process.env.COLLECTOR_PORT || "8888";
 const isDev = !app.isPackaged;
+
+// ===== astron 统一认证中心（SSO）配置：默认指向 stg，可用环境变量覆盖 =====
+// 真实拓扑（已从 astron 前端 .env + vite.config.js + hub application-local.yml 核对）：
+//   · 登录 UI 页门面：  https://hfaieco-stg-center.cnbita.com/heros/login  （VITE_SSO_BASE_URL）
+//   · 验票/getUserInfo：http://222.173.100.190:30080/api/v1/auth/getUserInfo，Host=aicloud-dev.xlc.com
+//   · hub 也用同一个用户中心验票 —— 三者同一套 SSO 联邦，cnbita 登录的 ticket 能在 hub 验过。
+// 登录流程：弹窗加载 {SSO_LOGIN_BASE}/heros/login?redirect=<回调>&from=agent
+//   → 用户登录 → 重定向回 <回调>?ticket=xxx
+//   → 拦截 ticket，调 getUserInfo 换 uid/用户名/token，并抓登录会话 Cookie
+//   → 写入端云协同配置（headers 带 Cookie，生产关 fallback 时靠稳定会话校验，不依赖一次性 ticket）。
+const SSO_LOGIN_BASE = (process.env.ASTRON_SSO_LOGIN_BASE || "https://hfaieco-stg-center.cnbita.com").replace(/\/$/, "");
+const SSO_FROM = process.env.ASTRON_SSO_FROM || "agent";
+// 验票后端（与登录 UI 不同域）：默认 stg 的 aicloud-dev，调用时带 Host 头
+const SSO_AUTH_BASE = (process.env.ASTRON_SSO_AUTH_BASE || "http://222.173.100.190:30080").replace(/\/$/, "");
+const SSO_AUTH_HOST = process.env.ASTRON_SSO_AUTH_HOST || "aicloud-dev.xlc.com";
+const SSO_USERINFO_PATH = process.env.ASTRON_SSO_USERINFO_PATH || "/api/v1/auth/getUserInfo";
+// 回调哨兵：SSO 会重定向到它并带 ?ticket=，我们在 will-redirect 阶段拦截，URL 本身无需真的可达
+const SSO_CALLBACK = `http://127.0.0.1:${SERVER_PORT}/sso-callback`;
 
 // 资源根：打包后在 resourcesPath/app；开发时用环境变量 ANYLLM_DIR 指向 anything-llm 源码根
 const RES = isDev
@@ -155,6 +173,129 @@ function openControlPanel() {
   });
 }
 
+// ===== astron SSO 登录：弹真实统一认证页 → 拦 ticket → 换 uid/token + 抓 Cookie → 写端云配置 =====
+let loginWin = null;
+
+// Node 原生 http(s)：允许覆盖 Host 头（Electron net.request 设 Host 会抛 ERR_INVALID_ARGUMENT），
+// 并能取 Set-Cookie。用于 ticket 换 getUserInfo（验票后端是 IP + 虚拟主机，必须改 Host）。
+function rawHttp({ method, url, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const https = require("https");
+    const { URL } = require("url");
+    const u = new URL(url);
+    const mod = u.protocol === "https:" ? https : http;
+    const payload = body ? (typeof body === "string" ? body : JSON.stringify(body)) : null;
+    const req = mod.request(
+      { protocol: u.protocol, hostname: u.hostname, port: u.port || (u.protocol === "https:" ? 443 : 80),
+        path: u.pathname + u.search, method: method || "GET",
+        headers: { ...(headers || {}), ...(payload ? { "Content-Length": Buffer.byteLength(payload) } : {}) } },
+      (res) => { let d = ""; res.on("data", (c) => (d += c));
+        res.on("end", () => resolve({ status: res.statusCode, text: d, setCookie: res.headers["set-cookie"] || [] })); }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// 调本地 server（127.0.0.1:SERVER_PORT）读/写端云配置
+function localServer({ method, path: p, body }) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request(
+      { host: "127.0.0.1", port: SERVER_PORT, path: p, method,
+        headers: payload ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {} },
+      (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve({ status: res.statusCode, text: d })); }
+    );
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function finishLoginWithTicket(ticket, sess) {
+  // 1) 用 ticket 换用户信息（验票后端与登录 UI 不同域，需带 Host；用 Node http 以便覆盖 Host + 抓 Set-Cookie）
+  let uid = "", username = "", token = "", setCookieArr = [];
+  try {
+    const r = await rawHttp({
+      method: "GET",
+      url: SSO_AUTH_BASE + SSO_USERINFO_PATH,
+      headers: { "X-Auth-Ticket": ticket, "X-Auth-Type": "3", Host: SSO_AUTH_HOST, Accept: "application/json" },
+    });
+    setCookieArr = r.setCookie || [];
+    const j = JSON.parse(r.text || "{}");
+    const d = j.data || j;
+    uid = String(d.uid || d.userId || d.id || "");
+    username = String(d.login || d.username || d.nickname || uid || "");
+    token = d.token ? String(d.token) : "";
+  } catch (e) {
+    console.error("[astron] getUserInfo 换票失败：", e.message);
+  }
+  // 远端可能不返 token：用 ticket 顶替，满足 hub fallback 的 token+uid 双必填
+  if (!token) token = ticket;
+
+  // 2) 组装 Cookie：优先 getUserInfo 下发的 Set-Cookie，再并上会话里 SSO 域 cookie（生产关 fallback 时靠它做稳定会话校验）
+  let cookieStr = "";
+  try {
+    const fromSet = (setCookieArr || []).map((sc) => String(sc).split(";")[0]).filter(Boolean);
+    const all = await sess.cookies.get({});
+    const fromSess = all.filter((c) => /cnbita\.com$|xlc\.com$/.test(c.domain || "")).map((c) => `${c.name}=${c.value}`);
+    cookieStr = [...fromSet, ...fromSess].join("; ");
+  } catch (_) {}
+
+  // 3) 组装鉴权头（与手动粘贴备用路径写的是同一份配置）
+  const headers = {
+    "X-Auth-Type": "3",
+    "X-Auth-User-Id": uid,
+    "X-Auth-User-Name": username,
+    token,
+    "X-Auth-Ticket": ticket,
+  };
+  if (cookieStr) headers["Cookie"] = cookieStr;
+
+  // 4) 读现有配置保留 gateway_url/mode，仅覆盖 headers，写回本地 server
+  let gateway_url = "", mode = "hybrid";
+  try {
+    const cur = await localServer({ method: "GET", path: "/knowledge/v1/astron/config" });
+    const c = JSON.parse(cur.text || "{}").data || {};
+    gateway_url = c.gateway_url || "";
+    mode = c.mode || "hybrid";
+  } catch (_) {}
+  await localServer({ method: "POST", path: "/knowledge/v1/astron/config", body: { gateway_url, mode, headers } });
+
+  if (loginWin && !loginWin.isDestroyed()) loginWin.close();
+  if (panelWin && !panelWin.isDestroyed()) panelWin.reload();
+  console.log(`[astron] SSO 登录完成：uid=${uid} user=${username} cookie=${cookieStr ? "有" : "无"}`);
+}
+
+function startAstronLogin() {
+  if (loginWin && !loginWin.isDestroyed()) { loginWin.focus(); return; }
+  const sess = session.fromPartition("persist:astron-sso");
+  loginWin = new BrowserWindow({
+    width: 520, height: 680, title: "登录 astron",
+    parent: panelWin && !panelWin.isDestroyed() ? panelWin : undefined,
+    webPreferences: { contextIsolation: true, session: sess },
+  });
+  const loginUrl = `${SSO_LOGIN_BASE}/heros/login?redirect=${encodeURIComponent(SSO_CALLBACK)}&from=${encodeURIComponent(SSO_FROM)}`;
+  loginWin.loadURL(loginUrl);
+
+  let done = false;
+  const tryTicket = (url, e) => {
+    if (done) return;
+    const m = (url || "").match(/[?&]ticket=([^&?#]+)/);
+    if (!m) return;
+    done = true;
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    finishLoginWithTicket(decodeURIComponent(m[1]), sess).catch((err) =>
+      console.error("[astron] 登录收尾失败：", err.message)
+    );
+  };
+  loginWin.webContents.on("will-redirect", (e, url) => tryTicket(url, e));
+  loginWin.webContents.on("will-navigate", (e, url) => tryTicket(url, e));
+  loginWin.webContents.on("did-navigate", (_e, url) => tryTicket(url, null));
+  loginWin.on("closed", () => { loginWin = null; });
+}
+
 function buildMenu() {
   const template = [
     ...(process.platform === "darwin" ? [{ role: "appMenu" }] : []),
@@ -163,6 +304,11 @@ function buildMenu() {
     {
       label: "端云协同",
       submenu: [
+        {
+          label: "登录 astron（获取鉴权）",
+          accelerator: "CmdOrCtrl+Shift+L",
+          click: startAstronLogin,
+        },
         {
           label: "打开控制台",
           accelerator: "CmdOrCtrl+Shift+K",
@@ -198,7 +344,11 @@ function shutdown() {
   try { collectorProc && collectorProc.kill(); } catch (_) {}
 }
 app.on("window-all-closed", () => {
-  shutdown();
-  if (process.platform !== "darwin") app.quit();
+  // macOS：关闭窗口不退出 App，也不要杀后端——否则点 Dock 图标重开窗口时
+  // server 已死，会打不开原来的页面（白屏/连不上）。只有真正退出（Cmd+Q）才 shutdown。
+  if (process.platform !== "darwin") {
+    shutdown();
+    app.quit();
+  }
 });
 app.on("quit", shutdown);

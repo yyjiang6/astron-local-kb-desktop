@@ -155,7 +155,7 @@ try {
   const feSrc = path.join(root, "frontend", "src");
   // 5a 替换侧边栏 logo 图（浅/深都换成平台 logo）
   if (fs.existsSync(brandLogo) && fs.existsSync(feSrc)) {
-    for (const name of ["anything-llm.png", "anything-llm-dark.png"]) {
+    for (const name of ["anything-llm.png", "anything-llm-dark.png", "anything-llm-icon.png"]) {
       const dst = path.join(feSrc, "media", "logo", name);
       if (fs.existsSync(path.dirname(dst))) {
         fs.copyFileSync(brandLogo, dst);
@@ -209,6 +209,34 @@ try {
   }
 } catch (e) {
   console.warn("• i18n 去品牌失败（非致命）:", e.message);
+}
+
+// 6b) 硬编码去品牌：非 locales 的 .js/.jsx 里 "AnythingLLM" -> "AstronKB"。
+// token 精确为 AnythingLLM（png 路径是小写 anything-llm，不受影响）；标识符与其引用一起改，保持一致。
+try {
+  const BRAND_SHORT = "AstronKB";
+  const feSrc2 = path.join(root, "frontend", "src");
+  if (fs.existsSync(feSrc2)) {
+    let changed = 0;
+    const walk = (dir) => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (ent.name === "locales") continue; // locales 由步骤 6 处理
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) walk(p);
+        else if (/\.(js|jsx)$/.test(ent.name)) {
+          const before = fs.readFileSync(p, "utf-8");
+          if (before.includes("AnythingLLM")) {
+            fs.writeFileSync(p, before.replace(/AnythingLLM/g, BRAND_SHORT));
+            changed++;
+          }
+        }
+      }
+    };
+    walk(feSrc2);
+    console.log(`✓ 硬编码文案/标识符 AnythingLLM -> ${BRAND_SHORT}（${changed} 个文件）`);
+  }
+} catch (e) {
+  console.warn("• 硬编码去品牌失败（非致命）:", e.message);
 }
 
 console.log("\n完成。适配器已应用，桌面端打包 server 时会一并包含 /knowledge/v1/* 端点 + 端云对话集成 + 平台品牌。");
