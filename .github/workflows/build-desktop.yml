@@ -38,21 +38,19 @@ jobs:
       - name: Checkout build kit
         uses: actions/checkout@v4
 
-      - name: Checkout anything-llm (official)
+      # 直接用 astron 自己的 fork（已含适配器/品牌/角标/菜单精简/跳过 onboarding 等全部定制），
+      # 不再 checkout 官方 anything-llm + apply-adapter 打补丁。CI 打包的就是你自己的代码。
+      - name: Checkout astron-anything-llm (fork)
         uses: actions/checkout@v4
         with:
-          repository: Mintplex-Labs/anything-llm
-          ref: ${{ github.event.inputs.anyllm_ref || 'master' }}
+          repository: yyjiang6/astron-anything-llm
+          ref: ${{ github.event.inputs.anyllm_ref || 'main' }}
           path: anything-llm
 
       - name: Setup Node 18
         uses: actions/setup-node@v4
         with:
           node-version: 18
-
-      - name: Apply astron adapter
-        shell: bash
-        run: node apply-adapter.cjs "${{ github.workspace }}/anything-llm"
 
       # anything-llm 是 yarn 项目（只有 yarn.lock，无 package-lock.json），必须用 yarn，不能 npm ci
       # GITHUB_TOKEN：@vscode/ripgrep 的 postinstall 会调 GitHub API 下载预编译二进制，
@@ -65,6 +63,15 @@ jobs:
         run: |
           ( cd anything-llm/server && yarn install --network-timeout 600000 )
           ( cd anything-llm/collector && yarn install --network-timeout 600000 )
+
+      # fork 仓库不含 db（gitignore）。CI 里生成一份已迁移 + 已标记 onboarding 完成的干净库随包，
+      # 否则首启会卡 anything-llm 的欢迎向导。跨平台用 prisma，不依赖 sqlite3 CLI。
+      - name: Prepare onboarded DB (skip first-run wizard)
+        shell: bash
+        run: |
+          cd anything-llm/server
+          npx prisma migrate deploy
+          node -e "const {PrismaClient}=require('@prisma/client');const p=new PrismaClient();(async()=>{await p.system_settings.upsert({where:{label:'onboarding_complete'},update:{value:'true'},create:{label:'onboarding_complete',value:'true'}});await p.\$disconnect();})().catch(e=>{console.error(e);process.exit(1)})"
 
       - name: Build frontend -> server/public
         shell: bash
