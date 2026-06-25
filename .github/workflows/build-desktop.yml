@@ -56,11 +56,16 @@ jobs:
       # anything-llm 是 yarn 项目（只有 yarn.lock，无 package-lock.json），必须用 yarn，不能 npm ci
       # GITHUB_TOKEN：@vscode/ripgrep 的 postinstall 会调 GitHub API 下载预编译二进制，
       # CI 未带 token 会触发 403 限流。注入内置 token 后用其认证，绕开 403。
+      # PUPPETEER_SKIP_DOWNLOAD：collector 依赖 puppeteer，其 postinstall 会下载 Chromium(~150MB)，
+      # 在 CI（尤其 Windows runner）上常卡死/超时。跳过下载，install 才能正常完成。
+      # （URL 网页抓取是次要功能，需要时运行环境另装 Chromium 即可；文档解析不受影响。）
       - name: Install server & collector
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "true"
         run: |
           ( cd anything-llm/server && yarn install --network-timeout 600000 )
           ( cd anything-llm/collector && yarn install --network-timeout 600000 )
