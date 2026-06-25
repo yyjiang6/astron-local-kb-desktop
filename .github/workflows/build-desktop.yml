@@ -47,10 +47,11 @@ jobs:
           ref: ${{ github.event.inputs.anyllm_ref || 'main' }}
           path: anything-llm
 
-      - name: Setup Node 18
+      # anything-llm 部分依赖（如 @aws-sdk/credential-providers）要求 node>=20，故用 Node 20。
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
 
       # anything-llm 是 yarn 项目（只有 yarn.lock，无 package-lock.json），必须用 yarn，不能 npm ci
       # GITHUB_TOKEN：@vscode/ripgrep 的 postinstall 会调 GitHub API 下载预编译二进制，
