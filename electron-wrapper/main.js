@@ -24,21 +24,43 @@ const SERVER_PORT = process.env.SERVER_PORT || "3001";
 const COLLECTOR_PORT = process.env.COLLECTOR_PORT || "8888";
 const isDev = !app.isPackaged;
 
-// ===== astron 统一认证中心（SSO）配置：默认指向 stg，可用环境变量覆盖 =====
-// 真实拓扑（已从 astron 前端 .env + vite.config.js + hub application-local.yml 核对）：
-//   · 登录 UI 页门面：  https://hfaieco-stg-center.cnbita.com/heros/login  （VITE_SSO_BASE_URL）
-//   · 验票/getUserInfo：http://222.173.100.190:30080/api/v1/auth/getUserInfo，Host=aicloud-dev.xlc.com
-//   · hub 也用同一个用户中心验票 —— 三者同一套 SSO 联邦，cnbita 登录的 ticket 能在 hub 验过。
+// ===== astron 环境地址配置（外置，改配置即可切 test/生产，无需重新打包）=====
+// 加载优先级（高 → 低）：
+//   1) 环境变量 ASTRON_SSO_*（开发/临时覆盖）
+//   2) userData/astron-env.json（装好后可改，切环境不用重打包）
+//   3) 随包 astron-env.json（打包时带的默认，当前为生产）
+//   4) 写死兜底
 // 登录流程：弹窗加载 {SSO_LOGIN_BASE}/heros/login?redirect=<回调>&from=agent
-//   → 用户登录 → 重定向回 <回调>?ticket=xxx
-//   → 拦截 ticket，调 getUserInfo 换 uid/用户名/token，并抓登录会话 Cookie
-//   → 写入端云协同配置（headers 带 Cookie，生产关 fallback 时靠稳定会话校验，不依赖一次性 ticket）。
-const SSO_LOGIN_BASE = (process.env.ASTRON_SSO_LOGIN_BASE || "https://hfaieco-stg-center.cnbita.com").replace(/\/$/, "");
-const SSO_FROM = process.env.ASTRON_SSO_FROM || "agent";
-// 验票后端（与登录 UI 不同域）：默认 stg 的 aicloud-dev，调用时带 Host 头
-const SSO_AUTH_BASE = (process.env.ASTRON_SSO_AUTH_BASE || "http://222.173.100.190:30080").replace(/\/$/, "");
-const SSO_AUTH_HOST = process.env.ASTRON_SSO_AUTH_HOST || "aicloud-dev.xlc.com";
-const SSO_USERINFO_PATH = process.env.ASTRON_SSO_USERINFO_PATH || "/api/v1/auth/getUserInfo";
+//   → 用户登录 → 重定向回 <回调>?ticket=xxx → 拦 ticket，调 getUserInfo 换 uid/token，抓 Cookie → 写端云配置。
+function loadEnvConfig() {
+  const fs = require("fs");
+  const merged = {};
+  // 3) 随包默认（打包后在 resourcesPath/astron-env.json 或 __dirname 旁）
+  for (const p of [
+    path.join(__dirname, "astron-env.json"),
+    process.resourcesPath ? path.join(process.resourcesPath, "astron-env.json") : null,
+  ]) {
+    try {
+      if (p && fs.existsSync(p)) Object.assign(merged, JSON.parse(fs.readFileSync(p, "utf-8")));
+    } catch (_) {}
+  }
+  // 2) userData 覆盖（装好后用户可改）
+  try {
+    const up = path.join(app.getPath("userData"), "astron-env.json");
+    if (fs.existsSync(up)) Object.assign(merged, JSON.parse(fs.readFileSync(up, "utf-8")));
+  } catch (_) {}
+  return merged;
+}
+const ENV_CFG = loadEnvConfig();
+const pick = (envKey, cfgKey, fallback) =>
+  process.env[envKey] || ENV_CFG[cfgKey] || fallback;
+
+const SSO_LOGIN_BASE = pick("ASTRON_SSO_LOGIN_BASE", "sso_login_base", "https://www.ai-hf.cn").replace(/\/$/, "");
+const SSO_FROM = pick("ASTRON_SSO_FROM", "sso_from", "agent");
+const SSO_AUTH_BASE = pick("ASTRON_SSO_AUTH_BASE", "sso_auth_base", "https://plat.ai-hf.cn").replace(/\/$/, "");
+const SSO_AUTH_HOST = pick("ASTRON_SSO_AUTH_HOST", "sso_auth_host", "plat.ai-hf.cn");
+const SSO_USERINFO_PATH = pick("ASTRON_SSO_USERINFO_PATH", "sso_userinfo_path", "/api/v1/auth/getUserInfo");
+const DEFAULT_GATEWAY_URL = pick("ASTRON_DEFAULT_GATEWAY_URL", "default_gateway_url", "https://plat.ai-hf.cn/agent/console-api");
 // 回调哨兵：SSO 会重定向到它并带 ?ticket=，我们在 will-redirect 阶段拦截，URL 本身无需真的可达
 const SSO_CALLBACK = `http://127.0.0.1:${SERVER_PORT}/sso-callback`;
 
@@ -331,6 +353,21 @@ app.whenReady().then(async () => {
     await waitForServer();
   } catch (e) {
     console.error(e.message);
+  }
+  // 默认 gateway 预填：配置里没设过 gateway_url 才填（不覆盖用户/登录已写的），用户免手填。
+  try {
+    const cur = await localServer({ method: "GET", path: "/knowledge/v1/astron/config" });
+    const c = JSON.parse(cur.text || "{}").data || {};
+    if (!c.gateway_url && DEFAULT_GATEWAY_URL) {
+      await localServer({
+        method: "POST",
+        path: "/knowledge/v1/astron/config",
+        body: { gateway_url: DEFAULT_GATEWAY_URL, mode: c.mode || "hybrid" },
+      });
+      console.log("[astron] 预填默认网关:", DEFAULT_GATEWAY_URL);
+    }
+  } catch (e) {
+    console.error("[astron] 预填默认网关失败:", e.message);
   }
   buildMenu();
   createWindow();

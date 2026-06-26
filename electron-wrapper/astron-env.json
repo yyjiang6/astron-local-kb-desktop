@@ -1,0 +1,28 @@
+{
+  "_comment": "环境地址配置。改这里即可切换 test/生产，无需重新打包。优先级：环境变量(ASTRON_*) > userData/astron-env.json(装好后可改) > 本文件(随包默认)。",
+  "_envs": {
+    "生产 production": {
+      "sso_login_base": "https://www.ai-hf.cn",
+      "sso_auth_base": "https://plat.ai-hf.cn",
+      "sso_auth_host": "plat.ai-hf.cn",
+      "sso_userinfo_path": "/api/v1/auth/getUserInfo",
+      "sso_from": "agent",
+      "default_gateway_url": "https://plat.ai-hf.cn/agent/console-api"
+    },
+    "测试 test/stg": {
+      "sso_login_base": "https://hfaieco-stg-center.cnbita.com",
+      "sso_auth_base": "http://222.173.100.190:30080",
+      "sso_auth_host": "aicloud-dev.xlc.com",
+      "sso_userinfo_path": "/api/v1/auth/getUserInfo",
+      "sso_from": "agent",
+      "default_gateway_url": "http://aicloud-dev.xlc.com:30080/agent/console-api"
+    }
+  },
+
+  "sso_login_base": "https://www.ai-hf.cn",
+  "sso_auth_base": "https://plat.ai-hf.cn",
+  "sso_auth_host": "plat.ai-hf.cn",
+  "sso_userinfo_path": "/api/v1/auth/getUserInfo",
+  "sso_from": "agent",
+  "default_gateway_url": "https://plat.ai-hf.cn/agent/console-api"
+}
