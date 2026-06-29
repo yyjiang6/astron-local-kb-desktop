@@ -55,14 +55,41 @@ const ENV_CFG = loadEnvConfig();
 const pick = (envKey, cfgKey, fallback) =>
   process.env[envKey] || ENV_CFG[cfgKey] || fallback;
 
-const SSO_LOGIN_BASE = pick("ASTRON_SSO_LOGIN_BASE", "sso_login_base", "https://www.ai-hf.cn").replace(/\/$/, "");
+// 单一地址原则：只需配「云端网关」，登录/验票地址默认从网关自动推导。
+//   · 控制台地址 = 网关去掉 /console-api（打开它，平台未登录会自动跳登录页）
+//   · 验票地址 auth_base = 网关 origin（协议+域名+端口）
+// 仍保留下列显式覆盖（环境变量或 astron-env.json），仅在自动推导不适用的边角场景使用。
 const SSO_FROM = pick("ASTRON_SSO_FROM", "sso_from", "agent");
-const SSO_AUTH_BASE = pick("ASTRON_SSO_AUTH_BASE", "sso_auth_base", "https://plat.ai-hf.cn").replace(/\/$/, "");
-const SSO_AUTH_HOST = pick("ASTRON_SSO_AUTH_HOST", "sso_auth_host", "plat.ai-hf.cn");
 const SSO_USERINFO_PATH = pick("ASTRON_SSO_USERINFO_PATH", "sso_userinfo_path", "/api/v1/auth/getUserInfo");
 const DEFAULT_GATEWAY_URL = pick("ASTRON_DEFAULT_GATEWAY_URL", "default_gateway_url", "https://plat.ai-hf.cn/agent/console-api");
+// 显式覆盖（默认空 → 走推导）；只有真填了才用
+const SSO_LOGIN_BASE_OVERRIDE = (process.env.ASTRON_SSO_LOGIN_BASE || ENV_CFG.sso_login_base || "").replace(/\/$/, "");
+const SSO_AUTH_BASE_OVERRIDE = (process.env.ASTRON_SSO_AUTH_BASE || ENV_CFG.sso_auth_base || "").replace(/\/$/, "");
+const SSO_AUTH_HOST_OVERRIDE = process.env.ASTRON_SSO_AUTH_HOST || ENV_CFG.sso_auth_host || "";
 // 回调哨兵：SSO 会重定向到它并带 ?ticket=，我们在 will-redirect 阶段拦截，URL 本身无需真的可达
 const SSO_CALLBACK = `http://127.0.0.1:${SERVER_PORT}/sso-callback`;
+
+// 取当前激活的网关（用户在控制台「高级设置」配的；没有则用默认）。
+async function getActiveGateway() {
+  try {
+    const cur = await localServer({ method: "GET", path: "/knowledge/v1/astron/config" });
+    const gw = (JSON.parse(cur.text || "{}").data || {}).gateway_url;
+    if (gw) return gw.replace(/\/$/, "");
+  } catch (_) {}
+  return DEFAULT_GATEWAY_URL.replace(/\/$/, "");
+}
+// 从网关推导验票后端：优先显式覆盖；否则取网关 origin。
+function deriveAuthBase(gateway) {
+  if (SSO_AUTH_BASE_OVERRIDE) return SSO_AUTH_BASE_OVERRIDE;
+  try { return new URL(gateway).origin; } catch (_) { return gateway; }
+}
+// 从网关推导登录入口：优先显式登录页；否则打开「控制台地址」(网关去掉 /console-api)，靠平台自动跳登录页。
+function deriveLoginEntry(gateway) {
+  if (SSO_LOGIN_BASE_OVERRIDE) {
+    return `${SSO_LOGIN_BASE_OVERRIDE}/heros/login?redirect=${encodeURIComponent(SSO_CALLBACK)}&from=${encodeURIComponent(SSO_FROM)}`;
+  }
+  return gateway.replace(/\/console-api\/?$/, "");
+}
 
 // 资源根：打包后在 resourcesPath/app；开发时用环境变量 ANYLLM_DIR 指向 anything-llm 源码根
 const RES = isDev
@@ -236,13 +263,19 @@ function localServer({ method, path: p, body }) {
 }
 
 async function finishLoginWithTicket(ticket, sess) {
-  // 1) 用 ticket 换用户信息（验票后端与登录 UI 不同域，需带 Host；用 Node http 以便覆盖 Host + 抓 Set-Cookie）
+  // 验票后端从当前网关推导（网关 origin）；仅在显式覆盖时带 Host 头（IP+虚拟主机的边角场景）。
+  const gateway = await getActiveGateway();
+  const authBase = deriveAuthBase(gateway);
+  const userInfoHeaders = { "X-Auth-Ticket": ticket, "X-Auth-Type": "3", Accept: "application/json" };
+  if (SSO_AUTH_HOST_OVERRIDE) userInfoHeaders.Host = SSO_AUTH_HOST_OVERRIDE;
+
+  // 1) 用 ticket 换用户信息（用 Node http 以便覆盖 Host + 抓 Set-Cookie）
   let uid = "", username = "", token = "", setCookieArr = [];
   try {
     const r = await rawHttp({
       method: "GET",
-      url: SSO_AUTH_BASE + SSO_USERINFO_PATH,
-      headers: { "X-Auth-Ticket": ticket, "X-Auth-Type": "3", Host: SSO_AUTH_HOST, Accept: "application/json" },
+      url: authBase + SSO_USERINFO_PATH,
+      headers: userInfoHeaders,
     });
     setCookieArr = r.setCookie || [];
     const j = JSON.parse(r.text || "{}");
@@ -290,7 +323,7 @@ async function finishLoginWithTicket(ticket, sess) {
   console.log(`[astron] SSO 登录完成：uid=${uid} user=${username} cookie=${cookieStr ? "有" : "无"}`);
 }
 
-function startAstronLogin() {
+async function startAstronLogin() {
   if (loginWin && !loginWin.isDestroyed()) { loginWin.focus(); return; }
   const sess = session.fromPartition("persist:astron-sso");
   loginWin = new BrowserWindow({
@@ -298,7 +331,11 @@ function startAstronLogin() {
     parent: panelWin && !panelWin.isDestroyed() ? panelWin : undefined,
     webPreferences: { contextIsolation: true, session: sess },
   });
-  const loginUrl = `${SSO_LOGIN_BASE}/heros/login?redirect=${encodeURIComponent(SSO_CALLBACK)}&from=${encodeURIComponent(SSO_FROM)}`;
+  // 登录入口从当前网关推导：默认打开控制台地址(网关去 /console-api)，平台未登录会自动跳登录页；
+  // 也支持显式覆盖直接打开登录页。整个过程拦截 ?ticket= 即可，无需配登录地址。
+  const gateway = await getActiveGateway();
+  const loginUrl = deriveLoginEntry(gateway);
+  console.log("[astron] 登录入口:", loginUrl, "| 验票后端推导:", deriveAuthBase(gateway));
   loginWin.loadURL(loginUrl);
 
   let done = false;
@@ -315,6 +352,7 @@ function startAstronLogin() {
   loginWin.webContents.on("will-redirect", (e, url) => tryTicket(url, e));
   loginWin.webContents.on("will-navigate", (e, url) => tryTicket(url, e));
   loginWin.webContents.on("did-navigate", (_e, url) => tryTicket(url, null));
+  loginWin.webContents.on("did-navigate-in-page", (_e, url) => tryTicket(url, null));
   loginWin.on("closed", () => { loginWin = null; });
 }
 
