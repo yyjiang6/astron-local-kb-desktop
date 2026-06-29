@@ -34,6 +34,8 @@ jobs:
             artifact: mac-installer
             node_name: node
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write   # 允许 CI 创建/更新 Release 并上传安装包资产
     steps:
       - name: Checkout build kit
         uses: actions/checkout@v4
@@ -117,3 +119,15 @@ jobs:
             electron-wrapper/dist/*.dmg
           if-no-files-found: warn
           retention-days: 14
+
+      # 打 tag 触发时，把本平台安装包发布为公开 Release 资产（免 token 直接下载）。
+      # 三个矩阵 job 共用同一 tag 的 Release，各自追加自己的安装包。
+      - name: Publish installer to Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            electron-wrapper/dist/*.exe
+            electron-wrapper/dist/*.AppImage
+            electron-wrapper/dist/*.dmg
+          fail_on_unmatched_files: false
