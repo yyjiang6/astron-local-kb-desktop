@@ -1,15 +1,15 @@
 {
-  "_comment": "单一地址：只需配「云端网关」default_gateway_url。登录页/验票地址默认从网关自动推导（控制台地址=网关去/console-api，平台自动跳登录页；验票=网关origin）。改这里=改打包默认（需重打包）；装好后改环境用 App 控制台『高级设置』里的网关输入框，或 userData/astron-env.json。",
-  "_切换环境示例": {
-    "生产 production": { "default_gateway_url": "https://plat.ai-hf.cn/agent/console-api" },
-    "测试 test/stg": {
-      "default_gateway_url": "http://aicloud-dev.xlc.com:30080/agent/console-api",
-      "_说明": "测试环境登录页/验票域名与网关不同源（cnbita/aicloud-dev），自动推导可能不适用，按需补下面三个显式覆盖：",
+  "_comment": "网关优先：只配 default_gateway_url（或在控制台『高级设置』改网关）。App 按网关自动决定登录/验票：① 命中 known_envs（按 match 子串匹配）→ 用该环境内置的 login/auth；② 否则从网关推导（控制台地址=网关去/console-api 自动跳登录页，验票=网关origin）。生产同源→走推导；测试三域名不同→命中内置测试预设。",
+
+  "default_gateway_url": "https://plat.ai-hf.cn/agent/console-api",
+
+  "known_envs": [
+    {
+      "name": "测试 test/stg",
+      "match": "aicloud-dev.xlc.com",
       "sso_login_base": "https://hfaieco-stg-center.cnbita.com",
       "sso_auth_base": "http://222.173.100.190:30080",
       "sso_auth_host": "aicloud-dev.xlc.com"
     }
-  },
-
-  "default_gateway_url": "https://plat.ai-hf.cn/agent/console-api"
+  ]
 }

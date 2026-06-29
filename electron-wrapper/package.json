@@ -1,6 +1,6 @@
 {
   "name": "astron-local-kb-desktop",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "本地知识库桌面客户端（anything-llm + astron /knowledge/v1 适配器）",
   "main": "main.js",
   "author": "astron",

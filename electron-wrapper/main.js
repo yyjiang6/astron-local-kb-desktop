@@ -78,17 +78,36 @@ async function getActiveGateway() {
   } catch (_) {}
   return DEFAULT_GATEWAY_URL.replace(/\/$/, "");
 }
-// 从网关推导验票后端：优先显式覆盖；否则取网关 origin。
-function deriveAuthBase(gateway) {
-  if (SSO_AUTH_BASE_OVERRIDE) return SSO_AUTH_BASE_OVERRIDE;
-  try { return new URL(gateway).origin; } catch (_) { return gateway; }
+// 已知环境表：按网关 match 子串匹配，命中则用该环境内置的登录/验票（解决测试环境三域名不同源、推导不出来）。
+// 来自 astron-env.json 的 known_envs；没配则用内置兜底（测试环境）。
+const KNOWN_ENVS = Array.isArray(ENV_CFG.known_envs) && ENV_CFG.known_envs.length
+  ? ENV_CFG.known_envs
+  : [{
+      name: "测试 test/stg",
+      match: "aicloud-dev.xlc.com",
+      sso_login_base: "https://hfaieco-stg-center.cnbita.com",
+      sso_auth_base: "http://222.173.100.190:30080",
+      sso_auth_host: "aicloud-dev.xlc.com",
+    }];
+function matchEnv(gateway) {
+  return KNOWN_ENVS.find((e) => e && e.match && String(gateway).includes(e.match)) || null;
 }
-// 从网关推导登录入口：优先显式登录页；否则打开「控制台地址」(网关去掉 /console-api)，靠平台自动跳登录页。
-function deriveLoginEntry(gateway) {
-  if (SSO_LOGIN_BASE_OVERRIDE) {
-    return `${SSO_LOGIN_BASE_OVERRIDE}/heros/login?redirect=${encodeURIComponent(SSO_CALLBACK)}&from=${encodeURIComponent(SSO_FROM)}`;
-  }
-  return gateway.replace(/\/console-api\/?$/, "");
+// 网关优先：根据网关解析 登录入口 / 验票后端 / Host。
+// 优先级：显式覆盖(环境变量/userData) > 命中已知环境(known_envs) > 从网关推导(生产同源)。
+function resolveSso(gateway) {
+  const env = matchEnv(gateway);
+  // 登录入口
+  const loginBase = SSO_LOGIN_BASE_OVERRIDE || (env && env.sso_login_base) || "";
+  const loginUrl = loginBase
+    ? `${loginBase.replace(/\/$/, "")}/heros/login?redirect=${encodeURIComponent(SSO_CALLBACK)}&from=${encodeURIComponent(SSO_FROM)}`
+    : gateway.replace(/\/console-api\/?$/, ""); // 控制台地址，平台未登录自动跳登录页
+  // 验票后端
+  let authBase = SSO_AUTH_BASE_OVERRIDE || (env && env.sso_auth_base) || "";
+  if (!authBase) { try { authBase = new URL(gateway).origin; } catch (_) { authBase = gateway; } }
+  authBase = authBase.replace(/\/$/, "");
+  // Host（仅 IP+虚拟主机的已知环境/显式覆盖才需要）
+  const authHost = SSO_AUTH_HOST_OVERRIDE || (env && env.sso_auth_host) || "";
+  return { loginUrl, authBase, authHost, envName: (env && env.name) || "推导(生产/同源)" };
 }
 
 // 资源根：打包后在 resourcesPath/app；开发时用环境变量 ANYLLM_DIR 指向 anything-llm 源码根
@@ -263,11 +282,11 @@ function localServer({ method, path: p, body }) {
 }
 
 async function finishLoginWithTicket(ticket, sess) {
-  // 验票后端从当前网关推导（网关 origin）；仅在显式覆盖时带 Host 头（IP+虚拟主机的边角场景）。
+  // 验票后端按网关解析（命中已知环境→用其 auth/host；否则取网关 origin）。
   const gateway = await getActiveGateway();
-  const authBase = deriveAuthBase(gateway);
+  const { authBase, authHost } = resolveSso(gateway);
   const userInfoHeaders = { "X-Auth-Ticket": ticket, "X-Auth-Type": "3", Accept: "application/json" };
-  if (SSO_AUTH_HOST_OVERRIDE) userInfoHeaders.Host = SSO_AUTH_HOST_OVERRIDE;
+  if (authHost) userInfoHeaders.Host = authHost;
 
   // 1) 用 ticket 换用户信息（用 Node http 以便覆盖 Host + 抓 Set-Cookie）
   let uid = "", username = "", token = "", setCookieArr = [];
@@ -334,8 +353,8 @@ async function startAstronLogin() {
   // 登录入口从当前网关推导：默认打开控制台地址(网关去 /console-api)，平台未登录会自动跳登录页；
   // 也支持显式覆盖直接打开登录页。整个过程拦截 ?ticket= 即可，无需配登录地址。
   const gateway = await getActiveGateway();
-  const loginUrl = deriveLoginEntry(gateway);
-  console.log("[astron] 登录入口:", loginUrl, "| 验票后端推导:", deriveAuthBase(gateway));
+  const { loginUrl, authBase, envName } = resolveSso(gateway);
+  console.log(`[astron] 环境=${envName} | 登录入口=${loginUrl} | 验票后端=${authBase}`);
   loginWin.loadURL(loginUrl);
 
   let done = false;
